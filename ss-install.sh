@@ -6,13 +6,10 @@
 #  (Windows / macOS / Android / iOS / OpenWrt) 里导入即可使用。
 #
 #  快速开始（在服务器上以 root 执行）:
-#      bash ss-install.sh
+#      bash ss-install.sh              安装
+#      bash ss-install.sh --uninstall  卸载
 #
-#  常用示例:
-#      bash ss-install.sh -p 8443 -k MyPass123 -t Tokyo-01 --bbr
-#      bash ss-install.sh --uninstall
-#
-#  完整参数见: bash ss-install.sh -h
+#  除 --uninstall 外不接受任何参数，端口、密码、加密方式均自动生成。
 # =============================================================================
 
 if [[ -z "${BASH_VERSION:-}" ]]; then
@@ -50,46 +47,12 @@ SS_METHOD=""
 SS_HOST=""
 SS_TAG=""
 SS_BIN=""
-FORCE=0
-ENABLE_BBR=0
 ACTION="install"
 APT_READY=0
 
 # ss:// 链接（在 build_links 中生成）
 SS_LINK_SIP002=""
 SS_LINK_LEGACY=""
-
-# ---------------------------------------------------------------------------
-# 帮助
-# ---------------------------------------------------------------------------
-usage() {
-  cat <<'EOF'
-ss-install.sh — Ubuntu / Debian 一键安装 Shadowsocks 服务端
-
-用法:
-  sudo bash ss-install.sh [选项]
-
-选项:
-  -p, --port <端口>        服务端口（默认: 随机 10000-65000）
-  -k, --password <密码>    连接密码（默认: 随机 24 位字母数字）
-  -m, --method <加密方式>  加密方式（默认: aes-256-gcm）
-  -H, --host <地址>        链接中使用的服务器地址（默认: 自动探测公网 IP）
-  -t, --tag <名称>         节点名称，即 ss:// 链接 # 后面的备注
-      --bbr                启用 BBR 拥塞控制（推荐，通常能明显提速）
-  -f, --force              忽略已有配置，强制重新生成端口和密码
-  -u, --uninstall          卸载服务端
-  -h, --help               显示本帮助
-
-支持的加密方式（AEAD，客户端兼容性最好）:
-  aes-256-gcm  aes-192-gcm  aes-128-gcm
-  chacha20-ietf-poly1305    xchacha20-ietf-poly1305
-
-示例:
-  sudo bash ss-install.sh
-  sudo bash ss-install.sh -p 8443 -k MyPass123 -t Tokyo-01 --bbr
-  sudo bash ss-install.sh --uninstall
-EOF
-}
 
 # ---------------------------------------------------------------------------
 # 基础工具函数
@@ -368,29 +331,6 @@ open_firewall() {
   fi
 }
 
-enable_bbr() {
-  local cur
-  cur="$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo '')"
-  if [[ "$cur" == "bbr" ]]; then
-    ok "BBR 已经处于启用状态"
-    return 0
-  fi
-
-  modprobe tcp_bbr 2>/dev/null || true
-  cat > /etc/sysctl.d/99-bbr-ss.conf <<'EOF'
-net.core.default_qdisc=fq
-net.ipv4.tcp_congestion_control=bbr
-EOF
-  sysctl --system >/dev/null 2>&1 || true
-
-  cur="$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo '')"
-  if [[ "$cur" == "bbr" ]]; then
-    ok "BBR 已启用"
-  else
-    warn "BBR 启用失败（内核可能不支持，当前: ${cur:-unknown}）"
-  fi
-}
-
 # ---------------------------------------------------------------------------
 # 输出结果
 # ---------------------------------------------------------------------------
@@ -451,42 +391,10 @@ do_uninstall() {
 parse_args() {
   while [[ $# -gt 0 ]]; do
     case "$1" in
-      -p|--port)
-        [[ $# -ge 2 ]] || die "参数 $1 缺少取值"
-        SS_PORT="$2"; shift 2 ;;
-      --port=*)      SS_PORT="${1#*=}"; shift ;;
-      -k|--password)
-        [[ $# -ge 2 ]] || die "参数 $1 缺少取值"
-        SS_PASSWORD="$2"; shift 2 ;;
-      --password=*)  SS_PASSWORD="${1#*=}"; shift ;;
-      -m|--method)
-        [[ $# -ge 2 ]] || die "参数 $1 缺少取值"
-        SS_METHOD="$2"; shift 2 ;;
-      --method=*)    SS_METHOD="${1#*=}"; shift ;;
-      -H|--host)
-        [[ $# -ge 2 ]] || die "参数 $1 缺少取值"
-        SS_HOST="$2"; shift 2 ;;
-      --host=*)      SS_HOST="${1#*=}"; shift ;;
-      -t|--tag)
-        [[ $# -ge 2 ]] || die "参数 $1 缺少取值"
-        SS_TAG="$2"; shift 2 ;;
-      --tag=*)       SS_TAG="${1#*=}"; shift ;;
-      --bbr)         ENABLE_BBR=1; shift ;;
-      -f|--force)    FORCE=1; shift ;;
       -u|--uninstall) ACTION="uninstall"; shift ;;
-      -h|--help)     usage; exit 0 ;;
-      *) die "未知参数: $1（使用 -h 查看帮助）" ;;
+      *) die "未知参数: $1（本脚本只支持 --uninstall 卸载，其余参数均已取消）" ;;
     esac
   done
-
-  if [[ -n "$SS_PORT" ]]; then
-    [[ "$SS_PORT" =~ ^[0-9]+$ ]] || die "端口必须是数字: $SS_PORT"
-    (( SS_PORT >= 1 && SS_PORT <= 65535 )) || die "端口范围必须在 1-65535: $SS_PORT"
-  fi
-
-  if [[ -n "$SS_METHOD" ]]; then
-    SS_METHOD="${SS_METHOD,,}"
-  fi
 }
 
 # ---------------------------------------------------------------------------
@@ -511,7 +419,7 @@ main() {
 
   # ---- 读取上次的配置（便于重复运行时保持一致）----
   local old_port="" old_pass="" old_method="" pass_b64=""
-  if [[ "$FORCE" -eq 0 && -f "$META_FILE" ]]; then
+  if [[ -f "$META_FILE" ]]; then
     old_port="$(meta_get META_PORT)"
     old_method="$(meta_get META_METHOD)"
     pass_b64="$(meta_get META_PASS_B64)"
@@ -526,12 +434,12 @@ main() {
   if [[ -z "$SS_METHOD" && -n "$old_method" ]]; then SS_METHOD="$old_method"; fi
 
   if [[ -z "$SS_PORT" ]]; then
-    SS_PORT="$(pick_port)" || die "无法找到空闲端口，请用 -p 手动指定"
+    SS_PORT="$(pick_port)" || die "无法找到空闲端口"
   fi
   if [[ -z "$SS_PASSWORD" ]]; then
     SS_PASSWORD="$(gen_password)"
   fi
-  [[ -n "$SS_PASSWORD" ]] || die "密码生成失败，请用 -k 手动指定"
+  [[ -n "$SS_PASSWORD" ]] || die "密码生成失败"
   [[ "$SS_PASSWORD" != *$'\n'* ]] || die "密码不能包含换行符"
 
   SS_METHOD="${SS_METHOD:-$DEFAULT_METHOD}"
@@ -541,19 +449,15 @@ main() {
   esac
 
   # ---- 服务器地址 ----
-  if [[ -n "$SS_HOST" ]]; then
-    info "使用指定的服务器地址: $SS_HOST"
+  SS_HOST="$(detect_host)" || true
+  if [[ -z "$SS_HOST" ]]; then
+    SS_HOST="YOUR_SERVER_IP"
+    warn "自动探测公网 IP 失败，请把链接里的 YOUR_SERVER_IP 换成真实地址"
   else
-    SS_HOST="$(detect_host)" || true
-    if [[ -z "$SS_HOST" ]]; then
-      SS_HOST="YOUR_SERVER_IP"
-      warn "自动探测公网 IP 失败，请把链接里的 YOUR_SERVER_IP 换成真实地址（或用 -H 指定）"
-    else
-      info "探测到公网 IP: $SS_HOST"
-    fi
+    info "探测到公网 IP: $SS_HOST"
   fi
   if [[ "$SS_HOST" =~ ^(10\.|192\.168\.|127\.|172\.(1[6-9]|2[0-9]|3[01])\.) ]]; then
-    warn "检测到内网地址，如果服务器在 NAT 后面，请用 -H 指定公网 IP 或域名"
+    warn "检测到内网地址，如果服务器在 NAT 后面，链接中的地址需要换成公网 IP 或域名"
   fi
   # IPv6 字面量需要加方括号
   if [[ "$SS_HOST" == *:* && "$SS_HOST" != \[* ]]; then
@@ -568,10 +472,7 @@ main() {
   write_service
   start_service
 
-  # ---- 系统优化 / 防火墙 ----
-  if [[ $ENABLE_BBR -eq 1 ]]; then
-    enable_bbr
-  fi
+  # ---- 防火墙 ----
   open_firewall
 
   # ---- 生成链接并输出 ----
